@@ -1,3 +1,97 @@
+# Implementation Notes
+
+## 1.  Installation
+
+### Prerequsites
+
+It may be necessary to install redis if not already present.
+
+### Setup
+
+Setup will look something like:
+
+```
+./bin/bundle update
+
+./bin/rails db:migrate
+
+./bin/bundle exec sidekiq
+
+./bin/bundle exec rails recs:get_all
+```
+
+### Maintenenace
+
+The rake task at the end may also be invoked by cron or some other OS scheduling facility.
+
+Something like:
+
+```
+export RAILS_PATH=<project path>
+( crontab -l 2>/dev/null; echo "* 1 * * * ( cd \"${RAILS_PATH}\"; ./bin/bundle exec rails recs:get_all >> ./log/cron.log 2>&1 )" ) | crontab -
+```
+
+is probably suitable.
+
+
+## 2.  Testing
+
+
+### Backend
+
+Tests are back-end focused, and can be run with
+
+`./bin/bundle exec rspec`
+
+### Frontend
+
+#### Parameterized URL fornm
+
+The API can be tested by running the rails server and browsing to
+
+http://localhost:3000/users/1/cars/recommended.json
+
+or similar url, with any combination of url parameters such as
+
+http://localhost:3000/users/1/cars/recommended.json?page_size=40
+
+#### Request body fornm
+
+It should also work with a POST or QUERY containing parameters in JSON format.
+
+
+## 3.  Implementation of spec
+
+I have interpreted the specifications in a couple of ways.
+
+- The absence of a user preferred price range means that all cars count as "in range" in terms of preferred price.  Thus for users with no preferred price range, there are only two labels:  best_match and null.  There will be no good_match entries in that case.  That is expected behavior.
+
+- Maintenance of price ranking is completely asynchronous with respect to recommendation requests.  Thus a maintenance strategy is required by the system operator and is not included explicitly as part of the rails app.  See installation notes for one way to handle this.  For testing and evaluation purposes, running the maintenance rake script should suffice.
+
+- There are two resources for accessing the car recommendations.  They are implemented identically, it is just two different resource paths.
+
+GET http://localhost:3000/users/1/cars/recommended.json  # expected for use with url parameters
+POST | QUERY http://localhost:3000/user_car_recommendations.json  # expected for use with POST or QUERY request body
+
+
+## 4.  Architecture
+
+### Approach
+
+My perception of the core problem presented by the requirements is that it is a data partitioning problem.  So my solution takes that form.  I implement a weighting query in pure SQL since Rails does not make it easy or maintainable to do idiomatically.    This query pulls together a complete view of the cars relation, blocked into 3 groups:  cars that match a user's preferred brands and are not outside any preferred price range; cars that match preferred brands but are outside preferred price range; and all others.  These groups are assigned a numeric label which is used to order them.  When serialized, the numeric label is converted into "best_match," "good_match," or null, respectively.  The serialized output is then displayed as JSON to the user.
+
+The weighting query uses left joining to group and so should be fairly scalable.  I particularly avoided case statements and multiple queries since they quickly become unperformant at scale.  Conversely I did want to make sure that I could make the best possible use union, left join, and paging parameters to pass workload optimization hints to the query planner as early as possible.
+
+### Performance
+
+I have not done serious stress-testing on this solution but based on my evaluation of query planning I believe it will scale predictably.  Ultimately the return set of any request is O(N) over all cars so the size of the cars table will always matter.  But the impact can be minimized by aggressively bounding the problem, and by structuring the query in such a way that the planner can pass those bounds down and optimize effectively with them.
+
+---
+
+
+
+---
+
 # Introduction
 
 We want to build a car market platform and provide a personalized selection of cars to our users. There are few main models:
